@@ -1,0 +1,132 @@
+name: run
+
+on:
+  schedule:
+    - cron: "11 * * * *"
+    - cron: "37 5 * * *"
+    - cron: "23 4 * * 0"
+  workflow_dispatch:
+    inputs:
+      command:
+        default: "daily"
+
+concurrency:
+  group: app
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+env:
+  APP_KEY: ${{ secrets.APP_KEY }}
+  NOTIFY_WEBHOOK: ${{ secrets.NOTIFY_WEBHOOK }}
+  PIN_APP_ID: ${{ secrets.PIN_APP_ID }}
+  PIN_APP_SECRET: ${{ secrets.PIN_APP_SECRET }}
+  PIN_REFRESH_TOKEN: ${{ secrets.PIN_REFRESH_TOKEN }}
+  PIN_WEBHOOK_URL: ${{ secrets.PIN_WEBHOOK_URL }}
+  PIN_WEBHOOK_TOKEN: ${{ secrets.PIN_WEBHOOK_TOKEN }}
+  TUMBLR_CONSUMER_KEY: ${{ secrets.TUMBLR_CONSUMER_KEY }}
+  TUMBLR_CONSUMER_SECRET: ${{ secrets.TUMBLR_CONSUMER_SECRET }}
+  TUMBLR_TOKEN: ${{ secrets.TUMBLR_TOKEN }}
+  TUMBLR_TOKEN_SECRET: ${{ secrets.TUMBLR_TOKEN_SECRET }}
+  BLUESKY_HANDLE: ${{ secrets.BLUESKY_HANDLE }}
+  BLUESKY_APP_PASSWORD: ${{ secrets.BLUESKY_APP_PASSWORD }}
+  THREADS_USER_ID: ${{ secrets.THREADS_USER_ID }}
+  THREADS_ACCESS_TOKEN: ${{ secrets.THREADS_ACCESS_TOKEN }}
+  GH_PAT: ${{ secrets.GH_PAT }}
+  PYTHONPATH: src
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    outputs:
+      deploy: ${{ steps.cmd.outputs.deploy }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: cmd
+        run: |
+          case "${{ github.event.schedule }}" in
+            "11 * * * *") c=hourly ;;
+            "37 5 * * *") c=daily ;;
+            "23 4 * * 0") c=threads-refresh ;;
+            *) c="${{ github.event.inputs.command || 'daily' }}" ;;
+          esac
+          echo "command=$c" >> "$GITHUB_OUTPUT"
+          if [ "$c" = daily ] || [ "$c" = build-site ]; then echo "deploy=true" >> "$GITHUB_OUTPUT"; fi
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -q -r requirements.txt
+
+      - name: config
+        env:
+          CFG_SETTINGS: ${{ secrets.APP_SETTINGS }}
+          CFG_CATEGORIES: ${{ secrets.APP_CATEGORIES }}
+        run: |
+          mkdir -p config
+          printf '%s\n' "$CFG_SETTINGS" > config/settings.yaml
+          printf '%s\n' "$CFG_CATEGORIES" > config/categories.yaml
+
+      - name: restore
+        run: |
+          mkdir -p state
+          if git ls-remote --exit-code --heads origin state >/dev/null; then
+            git fetch -q --depth=1 origin state
+            git --work-tree=state checkout origin/state -- .
+            git reset -q
+          fi
+          python -c "
+          from pathlib import Path
+          from app.crypto import decrypt_file, unpack_dir
+          s = Path('state')
+          if (s / 'state.enc').exists(): unpack_dir(s / 'state.enc', s)
+          elif (s / 'data.sqlite.enc').exists(): decrypt_file(s / 'data.sqlite.enc', s / 'data.sqlite')
+          "
+
+      - name: run
+        run: |
+          if [ "${{ steps.cmd.outputs.command }}" = threads-refresh ] && [ -z "$THREADS_ACCESS_TOKEN" ]; then exit 0; fi
+          python -m app.cli "${{ steps.cmd.outputs.command }}" > /dev/null
+
+      - name: save
+        if: always()
+        run: |
+          [ -f state/data.sqlite ] || exit 0
+          mkdir -p .pack
+          python -c "from pathlib import Path;from app.crypto import pack_dir;pack_dir(Path('state'),Path('.pack/state.enc'))"
+          cd .pack
+          git init -q -b state
+          git add -A
+          git -c user.name=bot -c user.email=bot@users.noreply.github.com commit -qm update
+          git push -qf "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" HEAD:state
+
+      - name: export
+        if: always()
+        run: |
+          [ -d state/exports ] || exit 0
+          python -c "from pathlib import Path;from app.crypto import pack_dir;pack_dir(Path('state/exports'),Path('exports.enc'))"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: exports
+          path: exports.enc
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - uses: actions/upload-pages-artifact@v3
+        if: steps.cmd.outputs.deploy == 'true'
+        with: { path: site }
+
+  deploy:
+    needs: run
+    if: needs.run.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    environment: { name: github-pages, url: "${{ steps.d.outputs.page_url }}" }
+    steps:
+      - id: d
+        uses: actions/deploy-pages@v4

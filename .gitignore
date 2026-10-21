@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.venv/
+.pack/
+state/
+site/
+config/
+tests/
+docs/
+backup/
+.env
+*.md
+*.bundle
+data/reports/*.csv
+*.egg-info/
+exports/
