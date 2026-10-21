@@ -103,7 +103,7 @@ jobs:
           cd .pack
           git init -q -b state
           git add -A
-          git -c user.name=bot -c user.email=bot@users.noreply.github.com commit -qm update
+          git -c user.name="github-actions[bot]" -c user.email=41898283+github-actions[bot]@users.noreply.github.com commit -qm update
           git push -qf "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" HEAD:state
 
       - name: export
