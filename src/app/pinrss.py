@@ -45,21 +45,8 @@ def _product_page(product: dict, cat: Category, copy: dict, link: str, img: str,
                  cats, cat.key, site, 1)
 
 
-def _pin_image(product: dict, title: str, out: Path, compose: bool, footer: str) -> tuple[str, int]:
-    f = out / "pins" / f"{product['product_id']}.jpg"
-    if compose:
-        try:
-            from .pinimage import make_pin
-            if not f.exists():
-                f.parent.mkdir(parents=True, exist_ok=True)
-                f.write_bytes(make_pin(product["image_url"], title, footer))
-            return f"pins/{f.name}", f.stat().st_size
-        except Exception as ex:
-            log.warning("pin image for %s failed: %s", product["product_id"], ex)
-    return product["image_url"], 0
-
-
 def build_feeds(con, settings: dict, cats: list[Category], out: Path) -> dict:
+    from .media import collage_specs, composed, image_rel, render_collage, render_post
     pcfg = settings["platforms"]["pin"]
     if not pcfg.get("enabled") or pcfg.get("mode") != "rss":
         return {}
@@ -68,25 +55,37 @@ def build_feeds(con, settings: dict, cats: list[Category], out: Path) -> dict:
     catmap = {c.key: c for c in cats}
     specs = board_specs(cats, settings)
     since = iso(utcnow() - timedelta(days=int(pcfg.get("rss_feed_days", 7))))
-    compose = pcfg.get("rss_compose_images", True)
     (out / "p").mkdir(parents=True, exist_ok=True)
     feeds: dict[str, list[str]] = {name: [] for name in specs}
+
+    def item(title, link, guid, when, desc, img_abs, size):
+        enclosure = f'<enclosure url="{xe(img_abs)}" type="image/jpeg" length="{size}"/>' if size else ""
+        return (f"<item><title>{xe(title)}</title><link>{xe(link)}</link><guid isPermaLink=\"false\">{guid}</guid>"
+                f"<pubDate>{format_datetime(when)}</pubDate><description>{xe(desc)}</description>{enclosure}"
+                f'<media:content url="{xe(img_abs)}" medium="image" type="image/jpeg"/></item>')
+
     for post in con.execute("""SELECT * FROM posts WHERE platform='pin' AND status='exported'
                                AND posted_at>=? ORDER BY posted_at DESC""", (since,)):
         product = dict(con.execute("SELECT * FROM products WHERE product_id=?", (post["product_id"],)).fetchone())
         cat = catmap.get(post["category"]) or cats[0]
         copy = copywriter.build(product, cat, settings, "pin", post["link"])
-        img, size = _pin_image(product, copy["title"], out, compose, f"Personalize it on {settings['shop']['brand']}")
-        img_abs = img if img.startswith("http") else f"{base}/{img}"
+        img, size = product["image_url"], 0
+        if composed(settings):
+            f, _ = render_post(con, settings, post, product, copy, out)
+            if f:
+                img, size = f"{base}/{image_rel(post['id'])}", f.stat().st_size
         page = f"p/{product['product_id']}.html"
-        (out / page).write_text(_product_page(product, cat, copy, post["link"], img_abs, settings, cats), encoding="utf-8")
-        enclosure = f'<enclosure url="{xe(img_abs)}" type="image/jpeg" length="{size}"/>' if size else ""
+        (out / page).write_text(_product_page(product, cat, copy, post["link"], img, settings, cats), encoding="utf-8")
         feeds.setdefault(board_name(cat, settings), []).append(
-            f"<item><title>{xe(copy['title'])}</title><link>{xe(f'{base}/{page}')}</link>"
-            f'<guid isPermaLink="false">p-{post["id"]}</guid>'
-            f"<pubDate>{format_datetime(parse_iso(post['posted_at']))}</pubDate>"
-            f"<description>{xe(copy['description'])}</description>{enclosure}"
-            f'<media:content url="{xe(img_abs)}" medium="image" type="image/jpeg"/></item>')
+            item(copy["title"], f"{base}/{page}", f"p-{post['id']}", parse_iso(post["posted_at"]), copy["description"], img, size))
+    today = utcnow().date()
+    for day in (today - timedelta(days=7), today):
+        for s in collage_specs(con, settings, cats, day):
+            f = render_collage(s, settings, out)
+            if f:
+                when = utcnow().replace(hour=0, minute=0, second=0) - timedelta(days=(today - day).days)
+                feeds.setdefault(s["board"], []).append(item(s["title"], s["link"], f"c-{s['key']}-{s['week']}", when,
+                                                             s["description"], f"{base}/{s['image_rel']}", f.stat().st_size))
     d = out / "feeds" / "pin"
     d.mkdir(parents=True, exist_ok=True)
     rows = []

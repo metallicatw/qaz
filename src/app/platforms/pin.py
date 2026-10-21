@@ -7,7 +7,7 @@ from pathlib import Path
 
 import requests
 
-from ..pinimage import make_pin
+from ..pinimage import PALETTES, TEMPLATES, make_pin, pick
 from .base import AuthError, check, env
 
 
@@ -67,7 +67,10 @@ class Pin:
         name = board_name(category, self.settings)
         spec = board_specs([category], self.settings)[name]
         board = self.board_id(name, spec["description"])
-        img = make_pin(product["image_url"], copy["title"], f"Personalize it on {self.settings['shop']['brand']}")
+        names = [t for t in (self.cfg.get("templates") or TEMPLATES) if t in TEMPLATES] or list(TEMPLATES)
+        img = make_pin(product["image_url"], copy["title"], f"Personalize it on {self.settings['shop']['brand']}",
+                       names[pick(product["product_id"], len(names), post["id"])], product.get("price"),
+                       pick(product["product_id"] + "p", len(PALETTES), post["id"]))
         body = {
             "board_id": board,
             "title": copy["title"],
@@ -147,18 +150,20 @@ def export_boards_csv(specs: dict, covers: dict, used: set[str], out_dir: Path, 
                         "Suggested cover image": c.get("image_url", ""), "Cover product": c.get("url", ""),
                         "Categories": ", ".join(s["categories"])})
     return f
-CSV_HEADER = ["Title", "Media URL", "Pin board", "Thumbnail", "Description", "Link",
-              "Publish date", "Keywords"]
 
 
-def export_csv(rows: list[dict], out_dir: Path, stamp: str) -> list[Path]:
+CSV_HEADER = ["Title", "Media URL", "Board", "Thumbnail", "Description", "Link", "Publish date", "Keywords"]
+
+
+def export_csv(rows: list[dict], out_dir: Path, stamp: str, board_column: str = "Board") -> list[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
+    header = [board_column if h == "Board" else h for h in CSV_HEADER]
     files = []
     for i in range(0, len(rows), 100):
         f = out_dir / f"pin_bulk_{stamp}_{i // 100 + 1}.csv"
         with open(f, "w", newline="", encoding="utf-8") as fh:
-            w = csv.DictWriter(fh, fieldnames=CSV_HEADER)
-            w.writeheader()
-            w.writerows(rows[i:i + 100])
+            w = csv.writer(fh)
+            w.writerow(header)
+            w.writerows([r[h] for h in CSV_HEADER] for r in rows[i:i + 100])
         files.append(f)
     return files

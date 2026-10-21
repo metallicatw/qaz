@@ -88,6 +88,8 @@ def build_stats(con, settings: dict, cats: list[Category]) -> dict:
     if st["harvest"]["own_products"] == 0:
         st["alerts"].append("尚未抓到任何自家商品 — 檢查 own_stores 設定")
 
+    from .perf import category_boost
+    boost = category_boost(con, settings, cats)
     st["categories"] = []
     for c in cats:
         harvested = con.execute("SELECT COUNT(*) FROM rankings WHERE category=?", (c.key,)).fetchone()[0]
@@ -95,7 +97,8 @@ def build_stats(con, settings: dict, cats: list[Category]) -> dict:
                                 AND status IN ('posted','exported')""", (c.key,)).fetchone()[0]
         st["categories"].append({"key": c.key, "qs": c.qs, "harvested": harvested, "posted": posted,
                                  "in_season": c.in_season(now.date()),
-                                 "weight": round(c.effective_weight(now.date()), 2)})
+                                 "boost": boost.get(c.key, 1.0),
+                                 "weight": round(c.effective_weight(now.date()) * boost.get(c.key, 1.0), 2)})
 
     s30 = con.execute("""SELECT kind, COUNT(*) n, SUM(COALESCE(amount,0)) amt, SUM(COALESCE(commission,0)) com
                          FROM sales WHERE sale_date>=? GROUP BY kind""", ((now - timedelta(days=30)).date().isoformat(),)).fetchall()
@@ -157,6 +160,9 @@ def to_markdown(st: dict, hide_money: bool = False) -> str:
           f"- 分類頁抓取：{h['pages_fetched']}/{h['pages_total']} 頁（{h['pct']}%），商品 {h['products']} 件，其中自家 {h['own_products']} 件",
           *[f"- {k}：已推 {v['done']} / {cov['harvested']}（{v['pct']}%），目前每日 {v['daily_cap']} 篇，預估再 {v['eta_days']} 天推完"
             for k, v in cov["platforms"].items()]]
+    boosted = sorted((c for c in st["categories"] if c.get("boost", 1.0) != 1.0), key=lambda c: -c["boost"])
+    if boosted:
+        L.append("- 依銷售自動加權：" + "、".join(f"{c['key']} ×{c['boost']}" for c in boosted[:8]))
     L += ["", "## 成效（銷售報表匯入）"]
     if st["sales_30d"]:
         for k, v in st["sales_30d"].items():

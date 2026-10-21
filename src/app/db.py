@@ -81,6 +81,13 @@ CREATE TABLE IF NOT EXISTS runs (
     summary      TEXT
 );
 CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS rank_history (
+    category     TEXT,
+    product_id   TEXT,
+    rank         INTEGER,
+    seen_on      TEXT,
+    PRIMARY KEY (category, product_id, seen_on)
+);
 """
 
 

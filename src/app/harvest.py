@@ -91,6 +91,9 @@ def run_harvest(con, client: FeedClient, cats: list[Category], settings: dict, t
                        ON CONFLICT(category,product_id) DO UPDATE SET page=excluded.page,
                        rank=MIN(rankings.rank,excluded.rank),seen_at=excluded.seen_at""",
                     (cat.key, it.product_id, page, base_rank + i, iso(utcnow())))
+                if base_rank + i <= int(z.get("history_max_rank", 300)):
+                    con.execute("INSERT OR REPLACE INTO rank_history(category,product_id,rank,seen_on) VALUES(?,?,?,?)",
+                                (cat.key, it.product_id, base_rank + i, today.isoformat()))
             con.execute(
                 """INSERT INTO harvest_pages(category,page,fetched_at,n_items,status) VALUES(?,?,?,?,?)
                    ON CONFLICT(category,page) DO UPDATE SET fetched_at=excluded.fetched_at,
@@ -98,5 +101,7 @@ def run_harvest(con, client: FeedClient, cats: list[Category], settings: dict, t
                 (cat.key, page, iso(utcnow()), len(items), status))
             fetched += 1
         con.commit()
+    con.execute("DELETE FROM rank_history WHERE seen_on<?", ((today - timedelta(days=int(z.get("history_days", 180)))).isoformat(),))
+    con.commit()
     new_products = con.execute("SELECT COUNT(*) FROM products").fetchone()[0] - before
     return {"pages_fetched": fetched, "new_products": new_products, "errors": errors}

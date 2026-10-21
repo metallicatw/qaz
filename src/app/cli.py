@@ -237,14 +237,75 @@ def cmd_unpack(con, S, C, a):
     return {"written": str(unpack_dir(src, src.with_suffix("")))}
 
 
+def _local(a, *parts):
+    from pathlib import Path
+
+    from .config import ROOT
+    return Path(a.out) if a.out else ROOT.joinpath("local", *parts)
+
+
+def cmd_guide_draft(con, S, C, a):
+    from .guides import draft
+    if not a.category:
+        return {"error": "use --category <key>", "categories": [c.key for c in C]}
+    f, how = draft(con, S, C, a.category, a.count or 24, a.topic, _local(a, "drafts"), use_ai=not a.no_ai)
+    return {"draft": str(f), "written_by": how, "next": f"edit it, then: python -m app.cli guide-publish --path {f}"}
+
+
+def cmd_guide_publish(con, S, C, a):
+    from pathlib import Path
+
+    from .config import DATA_DIR
+    from .guides import publish
+    out = publish(Path(a.path), DATA_DIR / "guides")
+    return {"encrypted": str(out), "next": "git add data/guides && git commit -m update && git push"}
+
+
+def cmd_trends(con, S, C, a):
+    from . import trends
+    f = _local(a, f"trends-{utcnow().date().isoformat()}.html")
+    f.parent.mkdir(parents=True, exist_ok=True)
+    rows = trends.analyze(con, S, C, a.days or 28)
+    f.write_text(trends.to_html(rows, S), encoding="utf-8")
+    return {"report": str(f), "categories": len(rows), "top": [r["cat"].key for r in rows[:5]]}
+
+
+def cmd_shorts(con, S, C, a):
+    from .shorts import make_shorts
+    return make_shorts(con, S, C, _local(a, "shorts"), a.count or 10)
+
+
+def local_sync() -> dict:
+    import subprocess
+
+    from .config import ROOT
+    from .crypto import decrypt_file, unpack_dir
+    subprocess.run(["git", "fetch", "-q", "origin", "state"], cwd=ROOT, check=True)
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    for name in ("state.enc", "data.sqlite.enc"):
+        r = subprocess.run(["git", "show", f"origin/state:{name}"], cwd=ROOT, capture_output=True)
+        if r.returncode == 0:
+            f = STATE_DIR / name
+            f.write_bytes(r.stdout)
+            if name == "state.enc":
+                unpack_dir(f, STATE_DIR)
+            else:
+                decrypt_file(f, STATE_DIR / "data.sqlite")
+            return {"synced": name, "state_dir": str(STATE_DIR)}
+    raise RuntimeError("no state found on origin/state")
+
+
 COMMANDS = {
     "probe": cmd_probe, "harvest": cmd_harvest, "plan": cmd_plan, "post": cmd_post, "hourly": cmd_hourly,
     "daily": cmd_daily, "export-pin": cmd_export_pin, "pin-boards": cmd_pin_boards, "metrics": cmd_metrics,
     "import-sales": cmd_import_sales, "report": cmd_report, "build-site": cmd_build_site, "status": cmd_status,
     "threads-refresh": cmd_threads_refresh, "auth-pin": cmd_auth_pin, "auth-tumblr": cmd_auth_tumblr,
     "keygen": cmd_keygen, "encrypt-file": cmd_encrypt_file, "unpack": cmd_unpack,
+    "guide-draft": cmd_guide_draft, "guide-publish": cmd_guide_publish, "trends": cmd_trends, "shorts": cmd_shorts,
+    "local-sync": None,
 }
-NO_RUN_LOG = {"probe", "status", "auth-pin", "auth-tumblr", "keygen", "encrypt-file", "unpack"}
+NO_RUN_LOG = {"probe", "status", "auth-pin", "auth-tumblr", "keygen", "encrypt-file", "unpack",
+              "guide-draft", "guide-publish", "trends", "shorts"}
 
 
 def main(argv=None):
@@ -255,9 +316,18 @@ def main(argv=None):
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--code")
     ap.add_argument("--redirect")
-    ap.add_argument("--path", help="file for encrypt-file")
+    ap.add_argument("--path", help="file for encrypt-file / unpack / guide-publish")
+    ap.add_argument("--category", help="guide-draft: category key")
+    ap.add_argument("--topic", help="guide-draft: topic / angle")
+    ap.add_argument("--count", type=int, help="guide-draft products / shorts videos")
+    ap.add_argument("--days", type=int, help="trends: look-back days for risers")
+    ap.add_argument("--out", help="output path for local commands")
+    ap.add_argument("--no-ai", action="store_true", help="guide-draft without the Claude API")
     a = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    if a.command == "local-sync":
+        print(json.dumps(local_sync(), ensure_ascii=False, indent=1))
+        return 0
     S, C = load_settings(), load_categories()
     con = connect(STATE_DIR / "data.sqlite")
     for old, new in (S.get("rename_platforms") or {}).items():

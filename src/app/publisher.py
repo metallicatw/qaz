@@ -77,6 +77,7 @@ def run_posts(con, settings: dict, cats: list[Category], per_run: int = 3) -> di
 
 def export_pin_csv(con, settings: dict, cats: list[Category], out_dir) -> list:
     from .boards import board_name, board_specs, cover_suggestions
+    from .media import base_url, collage_specs, exported_collages, mark_collages, post_media
     from .platforms.pin import export_boards_csv, export_csv
     catmap = {c.key: c for c in cats}
     rows, ids, titles, used = [], [], set(), set()
@@ -95,21 +96,35 @@ def export_pin_csv(con, settings: dict, cats: list[Category], out_dir) -> list:
         titles.add(title.lower())
         board = board_name(cat, settings)
         used.add(board)
+        media = post_media(settings, post, product)
         rows.append({
             "Title": title,
-            "Media URL": product["image_url"],
-            "Pin board": board,
-            "Thumbnail": "",
+            "Media URL": media["video"] or media["image"],
+            "Board": board,
+            "Thumbnail": media["image"] if media["video"] else "",
             "Description": copy["description"],
             "Link": post["link"],
             "Publish date": when.strftime("%Y-%m-%dT%H:%M:%S"),
             "Keywords": ", ".join(copy["tags"]),
         })
         ids.append(post["id"])
+    done = {r["image_rel"] for r in exported_collages(con)}
+    base_day = utcnow().date()
+    specs_out = [s for s in collage_specs(con, settings, cats, base_day) if s["image_rel"] not in done]
+    for i, s in enumerate(specs_out):
+        when = utcnow().replace(hour=20, minute=17, second=0) + timedelta(days=1 + 2 * i)
+        title = s["title"] if s["title"].lower() not in titles else s["title"][:90] + " – picks"
+        titles.add(title.lower())
+        used.add(s["board"])
+        rows.append({"Title": title, "Media URL": f"{base_url(settings)}/{s['image_rel']}", "Board": s["board"],
+                     "Thumbnail": "", "Description": s["description"], "Link": s["link"],
+                     "Publish date": when.strftime("%Y-%m-%dT%H:%M:%S"), "Keywords": ", ".join(s["tags"])})
+    if specs_out:
+        mark_collages(con, specs_out)
     if not rows:
         return []
     stamp = utcnow().strftime("%Y%m%d")
-    files = export_csv(rows, out_dir, stamp)
+    files = export_csv(rows, out_dir, stamp, settings["platforms"]["pin"].get("csv_board_column", "Board"))
     specs = board_specs(cats, settings)
     files.insert(0, export_boards_csv(specs, cover_suggestions(con, specs), used, out_dir, stamp))
     con.executemany("UPDATE posts SET status='exported', posted_at=scheduled_at WHERE id=?", [(i,) for i in ids])

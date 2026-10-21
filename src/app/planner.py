@@ -69,7 +69,12 @@ def own_candidates(con) -> list:
 
 
 def plan_day(con, platform: str, settings: dict, cats: list[Category], day: date,
-             rng: random.Random | None = None) -> int:
+             rng: random.Random | None = None, boost: dict[str, float] | None = None) -> int:
+    boost = boost or {}
+
+    def weight(c: Category) -> float:
+        return c.effective_weight(day) * boost.get(c.key, 1.0)
+
     pcfg = settings["platforms"][platform]
     if not pcfg.get("enabled"):
         return 0
@@ -119,9 +124,9 @@ def plan_day(con, platform: str, settings: dict, cats: list[Category], day: date
     cands = candidates_by_category(con, cats)
     progress = {c.key: sum(1 for p in cands[c.key] if p["product_id"] in ever) for c in cats}
     cursor = {c.key: 0 for c in cats}
-    active = [c for c in cats if cands[c.key] and c.effective_weight(day) > 0]
+    active = [c for c in cats if cands[c.key] and weight(c) > 0]
     while len(picks) < n and active:
-        active.sort(key=lambda c: progress[c.key] / c.effective_weight(day))
+        active.sort(key=lambda c: progress[c.key] / weight(c))
         c = active[0]
         lst, i = cands[c.key], cursor[c.key]
         while i < len(lst) and not ok(lst[i]):
@@ -147,14 +152,16 @@ def plan_day(con, platform: str, settings: dict, cats: list[Category], day: date
 
 
 def plan(con, settings: dict, cats: list[Category], today: date | None = None) -> dict:
+    from .perf import category_boost
     today = today or utcnow().date()
+    boost = category_boost(con, settings, cats)
     out = {}
     for plat in SOCIAL:
         pcfg = settings["platforms"].get(plat, {})
         if not pcfg.get("enabled"):
             continue
         horizon = 8 if (plat == "pin" and pcfg.get("mode") == "csv") else 1
-        out[plat] = sum(plan_day(con, plat, settings, cats, today + timedelta(days=d)) for d in range(horizon))
+        out[plat] = sum(plan_day(con, plat, settings, cats, today + timedelta(days=d), boost=boost) for d in range(horizon))
     return out
 
 
